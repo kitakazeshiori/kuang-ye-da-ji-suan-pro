@@ -1,5 +1,12 @@
 // 应用装配：把图模型、渲染器、交互控制器和 DOM 界面接起来。
 import { Graph } from "../core/graph.js";
+import {
+  FunctionLibrary,
+  buildFunctionDef,
+  expandGraph,
+  expandCallInPlace,
+  resultCandidates,
+} from "../core/functions.js";
 import { analyze, checkConstText } from "../core/validate.js";
 import * as progress from "../core/progress.js";
 import { GraphFormatError, fromProblemText, toProblemText } from "../core/serialize.js";
@@ -14,6 +21,8 @@ import * as ui from "./widgets.js";
 import { PROBLEM_TITLE, PROBLEM_LIMITS, problemForLevel } from "../core/problem.js";
 
 const STORAGE_KEY = "cgw.state.v1";
+// 画布上没有函数调用时的空映射，避免每次状态刷新都新建对象。
+const EMPTY_FN_MAP = new Map();
 const AUTOSAVE_MS = 700;
 // 超过这个规模就不做实时求值，避免编辑大图时主线程被周期性占满。
 const LIVE_EVAL_MAX_NODES = 4000;
@@ -47,6 +56,8 @@ export class App {
     this.level = SANDBOX;
     this.progress = {}; // 每关的通关记录：{ passed, stars, score, bestW, at }
     this.savedGraphs = {}; // 每关各自的画布：{ levelKey: graphJSON }
+    this.lib = new FunctionLibrary(); // 用户函数库（本地保存，所有关卡共用）
+    this._expCache = null;
     this.lastCheck = null;
     this.cascade = 0;
     this.checkConst = checkConstText;
@@ -81,6 +92,7 @@ export class App {
       onQuickMenu: (p) => this.openQuickMenu(p),
       onEditNode: (id) => this.editNode(id),
       onNodeMenu: (p) => this.openNodeMenu(p),
+      fnDef: (name) => this.lib.get(name),
       onCursor: (c) => {
         this.dom.canvas.style.cursor = c;
       },
@@ -224,6 +236,7 @@ export class App {
       level: this.level.key,
       graphs: this.savedGraphs,
       progress: this.progress,
+      functions: this.lib.toJSON(),
       view: this.renderer.view,
       io: document.body.classList.contains("val-collapsed"),
     };
@@ -239,6 +252,7 @@ export class App {
             level: payload.level,
             graphs: { [payload.level]: this.savedGraphs[payload.level] },
             progress: this.progress,
+            functions: this.lib.toJSON(),
             view: payload.view,
           })
         );
@@ -262,6 +276,9 @@ export class App {
       if (data.graphs && typeof data.graphs === "object") {
         this.savedGraphs = data.graphs;
         this.progress = data.progress && typeof data.progress === "object" ? data.progress : {};
+        this.lib = FunctionLibrary.fromJSON(data);
+        this._expCache = null;
+        this.buildPalette();
       } else if (data.graph) {
         // 旧版单图存档：迁移成「按关卡存放」。
         this.savedGraphs = { [data.level || "sandbox"]: data.graph };
@@ -339,7 +356,47 @@ export class App {
         "</span>";
       list.appendChild(btn);
     }
+    this._buildFnPalette(list);
     this._bindPaletteDrag();
+  }
+
+  // 工具箱下半部分：函数库。拖出来就是调用节点；「打包选中」把当前选区封装成函数。
+  _buildFnPalette(list) {
+    const head = document.createElement("div");
+    head.className = "fn-head";
+    const label = document.createElement("span");
+    label.textContent = "函数";
+    head.appendChild(label);
+    const sp = document.createElement("span");
+    sp.className = "spacer";
+    head.appendChild(sp);
+    const pack = document.createElement("button");
+    pack.type = "button";
+    pack.className = "fn-pack";
+    pack.textContent = "＋ 打包选中";
+    pack.title = "把画布上选中的节点封装成一个可复用的函数";
+    pack.addEventListener("click", () => this.openPackDialog());
+    head.appendChild(pack);
+    list.appendChild(head);
+    if (this.lib.size === 0) {
+      const hint = document.createElement("div");
+      hint.className = "fn-empty";
+      hint.textContent = "框选一组节点后点「打包选中」，就能把它变成拖出来即可调用的函数。";
+      list.appendChild(hint);
+      return;
+    }
+    for (const def of this.lib.list()) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "pnode";
+      btn.dataset.key = "fn:" + def.name;
+      btn.title = "函数 " + def.name + "（" + def.params + " 个参数；展开后 W" + def.weight + "）";
+      btn.innerHTML =
+        ui.glyphBox("fn") +
+        '<span class="pnode-meta"><b>' + ui.escapeHtml(def.name) + "</b><small>" + def.params + " 参</small></span>" +
+        '<span class="pnode-weight">W' + def.weight + "</span>";
+      list.appendChild(btn);
+    }
   }
 
   // 工具箱：指针拖拽（桌面与触屏通用）。拖到画布松手即在落点创建，单击则放在视图中央。
@@ -408,30 +465,72 @@ export class App {
     return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
   }
 
-  _canAdd(key) {
-    if (key === "out" && this.graph.outNodes().length > 0) {
-      ui.toast("只能有一个输出节点", "error");
-      return false;
+  // 工具箱条目的 key 既可以是节点类型，也可以是 "fn:函数名"。
+  _resolveKey(key) {
+    if (typeof key === "string" && key.startsWith("fn:")) {
+      const name = key.slice(3);
+      const def = this.lib.get(name);
+      if (!def) {
+        ui.toast("函数「" + name + "」不存在", "error");
+        return null;
+      }
+      return { type: "fn", opts: { fn: name, arity: def.params }, label: "函数 " + name };
     }
-    return true;
+    const t = NODE_TYPES[key];
+    if (!t) return null;
+    return { type: key, opts: {}, label: t.name };
+  }
+
+  _canAdd(key) {
+    const r = this._resolveKey(key);
+    if (!r) return null;
+    if (r.type === "out" && this.graph.outNodes().length > 0) {
+      ui.toast("只能有一个输出节点", "error");
+      return null;
+    }
+    return r;
   }
 
   addNodeAtScreen(key, clientX, clientY) {
-    if (!this._canAdd(key)) return;
+    const r = this._canAdd(key);
+    if (!r) return;
     const rect = this.dom.canvas.getBoundingClientRect();
     const wp = this.renderer.screenToWorld(clientX - rect.left, clientY - rect.top);
-    const node = this.editor.addNodeAt(key, wp, { center: true });
-    if (node) ui.toast("已添加 " + NODE_TYPES[key].name);
+    const node = this.editor.addNodeAt(r.type, wp, { center: true, ...r.opts });
+    if (node) ui.toast("已添加 " + r.label);
   }
 
   addFromPalette(key) {
-    if (!this._canAdd(key)) return;
-    const r = this.renderer;
-    const wp = r.screenToWorld(r.cssW / 2, r.cssH / 2);
+    const r = this._canAdd(key);
+    if (!r) return;
+    const rr = this.renderer;
+    const wp = rr.screenToWorld(rr.cssW / 2, rr.cssH / 2);
     this.cascade = (this.cascade + 1) % 5;
     const off = (this.cascade - 2) * 26;
-    const node = this.editor.addNodeAt(key, { x: wp.x + off, y: wp.y + off }, { center: true });
-    if (node) ui.toast("已添加 " + NODE_TYPES[key].name);
+    const node = this.editor.addNodeAt(r.type, { x: wp.x + off, y: wp.y + off }, { center: true, ...r.opts });
+    if (node) ui.toast("已添加 " + r.label);
+  }
+
+  // 画布图 + 函数库展开后的平图。求值 / 校验 / 导出 / 算权重都用它。
+  effective() {
+    if (
+      this._expCache &&
+      this._expCache.version === this.graph.version &&
+      this._expCache.libVersion === this.lib.version
+    ) {
+      return this._expCache.res;
+    }
+    // 画布上没有函数调用时直接返回原图：展开等于整体克隆，大图下没必要。
+    let hasFn = false;
+    for (const n of this.graph.nodes.values()) {
+      if (n.type === "fn") {
+        hasFn = true;
+        break;
+      }
+    }
+    const res = hasFn ? expandGraph(this.graph, this.lib) : { ok: true, graph: this.graph, fnMap: EMPTY_FN_MAP };
+    this._expCache = { version: this.graph.version, libVersion: this.lib.version, res };
+    return res;
   }
 
   bindToolbar() {
@@ -462,15 +561,18 @@ export class App {
 
   renderStatus() {
     const g = this.graph;
-    this.dom.statNodes.textContent = "节点 " + ui.formatInt(g.size);
-    this.dom.statCost.textContent = "加权 " + ui.formatInt(g.cost());
+    const eff = this.effective();
+    const cost = eff.ok ? eff.graph.cost() : g.cost();
+    const total = eff.ok ? eff.graph.size : g.size;
+    this.dom.statNodes.textContent = "节点 " + ui.formatInt(g.size) + (total !== g.size ? " → " + ui.formatInt(total) : "");
+    this.dom.statCost.textContent = "加权 " + ui.formatInt(cost);
     const base = this.level.base;
     this.dom.statLevel.textContent = this.level.name + (base ? " · 基准 " + ui.formatInt(base) : "");
     this.dom.statView.textContent = Math.round(this.renderer.view.scale * 100) + "%";
     const wleft = this.dom.weightLeft;
     if (wleft) {
       if (base) {
-        const rem = base - g.cost();
+        const rem = base - cost;
         wleft.hidden = false;
         wleft.querySelector("b").textContent = ui.formatInt(rem);
         wleft.classList.toggle("neg", rem < 0);
@@ -506,8 +608,17 @@ export class App {
     if (payload.side === "needs-input") items = items.filter((t) => t.arity > 0 || t.variableArity);
     else if (payload.side === "needs-output") items = items.filter((t) => t.hasOutput);
     const rect = this.dom.canvas.getBoundingClientRect();
+    const list = items.map((t) => ({ key: t.key, name: t.name, weight: t.weight }));
+    // 自定义函数排在最前面，往空白处拖线时可以直接建一个调用节点。
+    const fns = this.lib.list().slice(0, 6).map((d) => ({
+      key: "fn:" + d.name,
+      glyphKey: "fn",
+      name: "ƒ " + d.name,
+      weight: d.weight,
+    }));
+    list.unshift(...fns);
     ui.openQuickMenu(
-      items.map((t) => ({ key: t.key, name: t.name, weight: t.weight })),
+      list,
       { x: rect.left + payload.screen.x, y: rect.top + payload.screen.y },
       (key) => this.editor.applyQuickChoice(key),
       () => {
@@ -523,6 +634,7 @@ export class App {
     const t = NODE_TYPES[node.type];
     if (t.hasName) return this.openRename(node);
     if (t.hasValue) return this.openConstEditor(node);
+    if (t.isCall) return this.openFnInfo(node);
     this.editor.select([id]);
   }
 
@@ -547,6 +659,39 @@ export class App {
       this.deleteNode(node.id);
     });
     el.appendChild(del);
+
+    if (node.type === "fn") {
+      const info = document.createElement("button");
+      info.type = "button";
+      info.className = "qm-item";
+      info.textContent = "函数信息…";
+      info.addEventListener("click", () => {
+        this.closeNodeMenu();
+        this.openFnInfo(node);
+      });
+      el.insertBefore(info, del);
+      const inline = document.createElement("button");
+      inline.type = "button";
+      inline.className = "qm-item";
+      inline.textContent = "展开为节点";
+      inline.title = "把这次调用就地摊开成函数体，方便逐步调试";
+      inline.addEventListener("click", () => {
+        this.closeNodeMenu();
+        this.expandCall(node.id);
+      });
+      el.insertBefore(inline, del);
+    } else {
+      const pack = document.createElement("button");
+      pack.type = "button";
+      pack.className = "qm-item";
+      pack.textContent = "打包为函数…";
+      pack.title = "把当前选中的节点封装成一个可复用的函数";
+      pack.addEventListener("click", () => {
+        this.closeNodeMenu();
+        this.openPackDialog(node.id);
+      });
+      el.insertBefore(pack, del);
+    }
 
     el.hidden = false;
     const box = el.getBoundingClientRect();
@@ -582,6 +727,187 @@ export class App {
     if (!this.graph.has(id)) return;
     this.editor.select([id]);
     this.editor.deleteSelection();
+  }
+
+  // ---------- 函数：打包 / 调用 / 展开 ----------
+
+  // 把选中的节点封装成一个函数，并用一个调用节点替代它们。
+  openPackDialog(onlyId) {
+    const ids =
+      onlyId !== undefined && this.editor.selection.has(onlyId)
+        ? [...this.editor.selection]
+        : onlyId !== undefined
+        ? [onlyId]
+        : [...this.editor.selection];
+    if (ids.length === 0) {
+      ui.toast("先框选要打包的节点", "error");
+      return;
+    }
+    const wrap = document.createElement("div");
+    const field = document.createElement("div");
+    field.className = "field";
+    const label = document.createElement("label");
+    label.textContent = "函数名（1–24 个字符，不能有空白）";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = "fn" + Date.now().toString(36).slice(-3);
+    field.appendChild(label);
+    field.appendChild(input);
+    wrap.appendChild(field);
+
+    const cands = resultCandidates(this.graph, ids);
+    let pick = null;
+    if (cands.length > 1) {
+      const row = document.createElement("div");
+      row.className = "field";
+      row.style.marginTop = "8px";
+      const l2 = document.createElement("label");
+      l2.textContent = "函数结果（用哪个节点的值当返回值）";
+      const sel = document.createElement("select");
+      for (const id of cands) {
+        const opt = document.createElement("option");
+        opt.value = String(id);
+        const n = this.graph.get(id);
+        opt.textContent = "#" + id + " " + (n ? NODE_TYPES[n.type].name : "");
+        sel.appendChild(opt);
+      }
+      pick = sel;
+      row.appendChild(l2);
+      row.appendChild(sel);
+      wrap.appendChild(row);
+    }
+
+    const note = document.createElement("div");
+    note.className = "fn-empty";
+    note.textContent =
+      "输入节点会保留在画布上，作为函数参数的来源；其余被选中的节点会被一个调用节点取代。" +
+      "函数存在浏览器本地，所有关卡共用。";
+    wrap.appendChild(note);
+
+    const err = document.createElement("div");
+    err.className = "fn-empty";
+    err.style.color = "var(--err)";
+    err.hidden = true;
+    wrap.appendChild(err);
+
+    let sheet = null;
+    const doPack = () => {
+      const res = buildFunctionDef(this.graph, ids, input.value, pick ? Number(pick.value) : null, this.lib);
+      if (!res.ok) {
+        err.hidden = false;
+        err.textContent = res.error;
+        return;
+      }
+      if (sheet) sheet.close();
+      this.applyPack(res.def, res.plan);
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") doPack();
+    });
+    const row = document.createElement("div");
+    row.className = "row";
+    row.style.marginTop = "10px";
+    const ok = document.createElement("button");
+    ok.className = "btn";
+    ok.textContent = "打包";
+    ok.addEventListener("click", doPack);
+    row.appendChild(ok);
+    wrap.appendChild(row);
+    sheet = ui.openSheet({ title: "打包为函数", subtitle: "把一组节点封装成可复用的函数", bodyNode: wrap });
+    input.focus();
+    input.select();
+  }
+
+  applyPack(def, plan) {
+    const g = this.graph;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const id of plan.removed) {
+      const n = g.get(id);
+      if (!n) continue;
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + 150);
+      maxY = Math.max(maxY, n.y + 34);
+    }
+    const cx = Number.isFinite(minX) ? Math.round((minX + maxX) / 2) : 0;
+    const cy = Number.isFinite(minY) ? Math.round((minY + maxY) / 2) : 0;
+    const call = g.createNode("fn", cx, cy, { fn: def.name, arity: def.params });
+    for (let k = 0; k < plan.paramSources.length; k++) {
+      const src = plan.paramSources[k];
+      if (src !== null && src !== undefined) call.inputs[k] = src;
+    }
+    // 原来的下游改接到调用节点（调用节点自己的端口不能改，否则会接到自己）
+    for (const node of g.nodes.values()) {
+      if (node.id === call.id) continue;
+      for (let p = 0; p < node.inputs.length; p++) {
+        if (node.inputs[p] === plan.result) node.inputs[p] = call.id;
+      }
+    }
+    g.removeMany(plan.removed);
+    g.touch();
+    this.lib.set(def);
+    this._expCache = null;
+    this.buildPalette();
+    this.editor.invalidate(null);
+    this.editor.select([call.id]);
+    this.commit("打包函数 " + def.name);
+    this.renderStatus();
+    this.scheduleValues(true);
+    ui.toast("已封装函数 " + def.name + "（展开后 W" + def.weight + "）", "ok");
+  }
+
+  expandCall(id) {
+    const res = expandCallInPlace(this.graph, id, this.lib);
+    if (!res.ok) {
+      ui.toast(res.error, "error");
+      return;
+    }
+    this.editor.invalidate(null);
+    this.editor.select(res.ids || []);
+    this.commit("展开函数调用");
+    this.renderStatus();
+    this.scheduleValues(true);
+  }
+
+  openFnInfo(node) {
+    const def = this.lib.get(node.fn);
+    const wrap = document.createElement("div");
+    const info = document.createElement("div");
+    info.className = "prose";
+    info.innerHTML = def
+      ? "<b>ƒ " + ui.escapeHtml(def.name) + "</b>：参数 " + def.params + " 个，展开后加权 W" + def.weight + "。<br>" +
+        "函数库存在浏览器本地，所有关卡共用；调用节点在检查 / 导出时会自动展开成平图。"
+      : "函数「" + ui.escapeHtml(node.fn || "?") + "」已经不在函数库里了，这个调用节点无法展开，可以删掉它。";
+    wrap.appendChild(info);
+    const row = document.createElement("div");
+    row.className = "row";
+    row.style.marginTop = "10px";
+    const inlineBtn = document.createElement("button");
+    inlineBtn.className = "btn";
+    inlineBtn.textContent = "展开为节点";
+    inlineBtn.addEventListener("click", () => {
+      sheet.close();
+      this.expandCall(node.id);
+    });
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn";
+    delBtn.textContent = "从函数库删除";
+    delBtn.addEventListener("click", () => {
+      if (!def || !this.lib.delete(node.fn)) return;
+      this._expCache = null;
+      this.buildPalette();
+      sheet.close();
+      this.markCheckStale();
+      this.scheduleSave();
+      ui.toast("已从函数库删除 " + node.fn);
+    });
+    row.appendChild(inlineBtn);
+    row.appendChild(delBtn);
+    wrap.appendChild(row);
+    const sheet = ui.openSheet({ title: "函数调用", subtitle: node.fn || "", bodyNode: wrap });
   }
 
   // ---------- 重命名 ----------
@@ -765,20 +1091,31 @@ export class App {
     );
   }
 
-  // 求值整张图，拿到每个节点（含中间值）的结果。
+  // 求值整张图（先把函数调用展开），拿到每个节点（含中间值）的结果。
   evaluateNow() {
-    if (this.graph.size > LIVE_EVAL_MAX_NODES) {
+    const eff = this.effective();
+    if (!eff.ok) return { ok: false, error: { message: "函数展开失败：" + eff.error } };
+    const g = eff.graph;
+    if (this.graph.size > LIVE_EVAL_MAX_NODES || g.size > LIVE_EVAL_MAX_NODES) {
       return {
         ok: false,
         error: {
           message:
-            "图较大（" + ui.formatInt(this.graph.size) + " 个节点），已暂停实时求值；点「运行检查」查看结果。",
+            "图较大（展开后 " + ui.formatInt(g.size) + " 个节点），已暂停实时求值；点「运行检查」查看结果。",
         },
       };
     }
-    const inputs = this.graph.inputNodes().map((n) => (n.inputValue === undefined ? "0" : n.inputValue));
+    const inputs = g.inputNodes().map((n) => (n.inputValue === undefined ? "0" : n.inputValue));
     try {
-      return evaluateGraph(this.graph, inputs);
+      const res = evaluateGraph(g, inputs);
+      // 调用节点在展开图里没有对应节点，把它的结果值借过来，数值面板照样能看。
+      if (res.ok && eff.fnMap && eff.fnMap.size > 0) {
+        for (const [callId, srcId] of eff.fnMap) {
+          const v = res.values.get(srcId);
+          if (v !== undefined) res.values.set(callId, v);
+        }
+      }
+      return res;
     } catch (err) {
       return { ok: false, error: { message: String((err && err.message) || err) } };
     }
@@ -818,7 +1155,7 @@ export class App {
       body.appendChild(
         this._hint(
           count > 1
-            ? "已选中 " + count + " 个节点。单击单个节点即可查看它的精确数值。"
+            ? "已选中 " + count + " 个节点。单击单个节点查看数值，或点工具箱里的「＋ 打包选中」把它们封装成函数。"
             : "单击画布上的任意节点，这里会显示它当前的精确数值：输入 / 常数节点可直接修改，其余节点只读（可查看中间值）。"
         )
       );
@@ -840,7 +1177,8 @@ export class App {
 
       const head = document.createElement("div");
       head.className = "val-node";
-      const name = node.type === "I" || isOut ? "#" + (node.name || "?") : t.name;
+      const name =
+        node.type === "I" || isOut ? "#" + (node.name || "?") : node.type === "fn" ? "ƒ " + (node.fn || "?") : t.name;
       head.innerHTML =
         ui.glyphBox(node.type) +
         "<b>" +
@@ -933,6 +1271,8 @@ export class App {
     else if (editable)
       note.textContent =
         node.type === "I" ? "输入值：按位编辑，改动会立刻参与求值。" : "常数值：按位编辑，|c| ≤ 10^6。";
+    else if (node.type === "fn")
+      note.textContent = "函数「" + (node.fn || "?") + "」的输出（只读）——展开后的计算结果。";
     else
       note.textContent =
         node.type === "out"
@@ -1071,7 +1411,9 @@ export class App {
     const chip = this.dom.statCheck;
     try {
       const level = this.level;
-      const res = analyze(this.graph, level);
+      const eff = this.effective();
+      const res = analyze(this.graph, level, { expanded: eff.ok ? eff.graph : null });
+      if (!eff.ok) res.errors.unshift({ code: "fn", message: "函数展开失败：" + eff.error });
       this.lastCheck = res;
 
       // 1) 结构有问题：直接说明问题。
@@ -1113,7 +1455,7 @@ export class App {
         const vectors = await loadVectors();
         const pack = vectors[level.key];
         if (!pack) throw new Error("缺少 " + level.key + " 的参考数据，请先运行 tools/gen_vectors.mjs");
-        grade = await gradeAgainstVectorsAsync(this.graph, pack, (done, total) => {
+        grade = await gradeAgainstVectorsAsync(eff.ok ? eff.graph : this.graph, pack, (done, total) => {
           wait.textContent = "正在求值 " + done + " / " + total + " 组…";
         });
       } catch (err) {
@@ -1163,7 +1505,9 @@ export class App {
   showExport() {
     let text = "";
     try {
-      text = toProblemText(this.graph);
+      const eff = this.effective();
+      if (!eff.ok) throw new GraphFormatError("fn", "函数展开失败：" + eff.error);
+      text = toProblemText(eff.graph);
     } catch (err) {
       const msg = err instanceof GraphFormatError ? err.message : "导出失败：" + err.message;
       ui.toast(msg, "error");
@@ -1446,7 +1790,10 @@ export class App {
       "<li>快捷键：<code>V</code> 指针、<code>H</code> 平移、<code>F</code> 适应内容、<code>G</code> 网格吸附、<code>Delete</code> 删除、<code>Ctrl+Z/Y</code> 撤销重做、<code>Ctrl+C/V/D</code> 复制粘贴、<code>Ctrl+S</code> 保存。</li>" +
       "</ul></div>" +
       "<div class='prose'><b>节点与权重</b>" + types + "<div style='margin-top:6px;color:var(--fg-mute)'>输出节点 OUT 不计权重与引用上限。</div></div>" +
-      "<div class='prose'><b>关于评分</b><p>本题唯一的硬约束是加权节点数 W 与结构合法性，没有运行时间限制；数值评测用 72 位定点对照官方参考值。通关要求数值全部通过且 W &lt; 2B，按 W 给 1–3 星。导出会把图按拓扑序重新编号为题面要求的标准文本。</p></div>" +
+      "<div class='prose'><b>函数（打包复用）</b><p>框选一组节点，点工具箱里的「＋ 打包选中」就能把它封装成函数：选中的输入节点留作参数来源，其余节点被一个调用节点取代。" +
+        "函数会出现在工具箱下方的「函数」栏，拖出来即可复用。</p>" +
+        "<p>调用节点在检查 / 导出时会先<b>宏展开</b>成平图，所以 W 按展开后的节点数计，评分口径不变；节点右侧小三角里，「打包为函数…」对选区打包，调用节点上还有「函数信息…」与「展开为节点」（就地摊开，方便调试）。函数库存在浏览器本地，所有关卡共用。</p></div>" +
+        "<div class='prose'><b>关于评分</b><p>本题唯一的硬约束是加权节点数 W 与结构合法性，没有运行时间限制；数值评测用 72 位定点对照官方参考值。通关要求数值全部通过且 W &lt; 2B，按 W 给 1–3 星。导出会把图按拓扑序重新编号为题面要求的标准文本。</p></div>" +
       "<div class='prose'><b>机器规格与限制</b>" + PROBLEM_LIMITS + "</div>";
     const sheet = ui.openSheet({ title: "帮助", subtitle: "旷野大计算 pro · 可视化编辑器", bodyHtml: html });
     ui.renderMath(sheet.body);

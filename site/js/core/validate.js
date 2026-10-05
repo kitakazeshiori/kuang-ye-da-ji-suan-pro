@@ -28,14 +28,24 @@ export function scoreFactor(cost, base) {
   return (2 * base - cost) / base;
 }
 
-export function analyze(graph, level) {
+export function analyze(graph, level, opts = {}) {
+  // 结构错误一律在「画布图」上判定（报错里的编号才是用户看到的编号）；
+  // 规模 / 引用 / 权重则按展开后的平图统计，才能反映真正导出/评测的东西。
+  const measured = opts.expanded || graph;
   const errors = [];
   const warnings = [];
   const nodes = [];
   for (const node of graph.nodes.values()) nodes.push(node);
-  const nodeCount = nodes.length;
+  let nodeCount = 0;
   let refs = 0;
   let cost = 0;
+  for (const node of measured.nodes.values()) {
+    const t = NODE_TYPES[node.type];
+    if (!t) continue;
+    nodeCount++;
+    cost += t.weight;
+    if (!t.isOutput) for (const s of node.inputs) if (s !== null) refs++;
+  }
   const dangling = [];
   const unusedHint = [];
 
@@ -57,11 +67,9 @@ export function analyze(graph, level) {
       errors.push({ code: "type", nodeId: node.id, message: "节点 #" + node.id + " 类型未知" });
       continue;
     }
-    cost += t.weight;
     for (let i = 0; i < node.inputs.length; i++) {
       const s = node.inputs[i];
       if (s === null) dangling.push({ nodeId: node.id, port: i });
-      else if (!t.isOutput) refs++;
     }
     if (t.hasValue) {
       const r = checkConstText(node.value);

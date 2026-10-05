@@ -37,6 +37,7 @@ export function nodeWidth(node) {
   let w;
   if (node.type === "C") w = 30 + textWidth(shortText(node.value, 26), 7.6);
   else if (node.type === "I" || node.type === "out") w = 42 + textWidth("#" + nameOf(node), 8.6) + VALUE_W;
+  else if (node.type === "fn") w = 34 + textWidth("ƒ " + (node.fn || "?"), 8.8);
   else w = 44 + textWidth(t.en || t.name, 10);
   // 端口多的节点要足够宽，避免端口挤在一起。
   const n = node.inputs ? node.inputs.length : t.arity || 0;
@@ -77,6 +78,7 @@ export function nodeLabel(node) {
   if (node.type === "I") return { title: "#" + nameOf(node), accent: t.hue, weight: t.weight };
   if (node.type === "out") return { title: "#" + nameOf(node), accent: t.hue, weight: 0 };
   if (node.type === "C") return { title: shortText(node.value, 22), accent: t.hue, weight: t.weight };
+  if (node.type === "fn") return { title: "ƒ " + (node.fn || "?"), accent: t.hue, weight: 0 };
   return { title: t.en || t.name, accent: t.hue, weight: t.weight };
 }
 

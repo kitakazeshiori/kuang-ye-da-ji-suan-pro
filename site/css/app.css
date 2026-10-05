@@ -343,6 +343,38 @@ body.val-collapsed #value-panel {
   font-variant-numeric: tabular-nums;
 }
 
+/* 工具箱里的「函数」分组与打包按钮 */
+.fn-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+}
+.fn-head .spacer { flex: 1; }
+.fn-pack {
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.fn-pack:hover { border-color: var(--accent); color: var(--accent); }
+.fn-empty {
+  padding: 2px 12px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-mute);
+}
+
 .palette-hint {
   padding: 4px 12px 14px;
   font-size: 11px;

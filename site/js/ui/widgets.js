@@ -165,7 +165,7 @@ export function openQuickMenu(items, at, onPick, onCancel) {
   for (const item of items) {
     const btn = document.createElement("button");
     btn.className = "qm-item";
-    btn.innerHTML = glyphBox(item.key) + "<span>" + escapeHtml(item.name) + "</span>" +
+    btn.innerHTML = glyphBox(item.glyphKey || item.key) + "<span>" + escapeHtml(item.name) + "</span>" +
       '<span class="spacer"></span><span class="pnode-weight">W' + item.weight + "</span>";
     btn.addEventListener("click", () => {
       closeQuickMenu(true);

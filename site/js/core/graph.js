@@ -37,7 +37,10 @@ export class Graph {
     if (t.hasValue) node.value = opts.value === undefined ? "1" : String(opts.value);
     if (t.hasName) node.name = opts.name ? String(opts.name) : this.nextName();
     if (typeKey === "I") node.inputValue = opts.inputValue === undefined ? "1" : String(opts.inputValue);
-    const arity = t.variableArity ? Math.max(1, opts.arity || t.arity) : t.arity;
+    if (opts.fn !== undefined) node.fn = String(opts.fn);
+    const arity = t.variableArity
+      ? Math.max(typeKey === "out" ? 1 : 0, opts.arity === undefined ? t.arity : Math.round(opts.arity))
+      : t.arity;
     node.inputs = new Array(arity).fill(null);
     this.nodes.set(node.id, node);
     this.touch();
@@ -140,7 +143,7 @@ export class Graph {
   // 可变端口类型（目前只有 OUT）的端口数量调整，尽量保留已有连接。
   setArity(id, arity) {
     const node = this.nodes.get(id);
-    if (!node || !NODE_TYPES[node.type].variableArity) return false;
+    if (!node || !NODE_TYPES[node.type].variableArity || NODE_TYPES[node.type].isCall) return false;
     const n = Math.max(1, Math.min(16, Math.round(arity)));
     const old = node.inputs;
     const next = new Array(n).fill(null);
@@ -311,6 +314,7 @@ export class Graph {
       if (node.value !== undefined) copy.value = node.value;
       if (node.name !== undefined) copy.name = node.name;
       if (node.inputValue !== undefined) copy.inputValue = node.inputValue;
+      if (node.fn !== undefined) copy.fn = node.fn;
       nodes.push(copy);
     }
     return { nextId: this.nextId, nodes };
@@ -324,6 +328,7 @@ export class Graph {
       if (n.value !== undefined) copy.value = String(n.value);
       if (n.name !== undefined) copy.name = String(n.name);
       if (n.inputValue !== undefined) copy.inputValue = String(n.inputValue);
+      if (n.fn !== undefined) copy.fn = String(n.fn);
       g.nodes.set(copy.id, copy);
       if (copy.id >= g.nextId) g.nextId = copy.id + 1;
     }

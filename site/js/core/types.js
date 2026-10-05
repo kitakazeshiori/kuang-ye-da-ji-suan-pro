@@ -38,6 +38,11 @@ export const NODE_TYPES = {
     key: "sqrt", op: "Q", name: "平方根", en: "sqrt", glyph: "√", arity: 1, weight: 7,
     hasOutput: true, hue: "#22c55e", desc: "√x，要求 x ≥ 0。权重 7。",
   },
+  fn: {
+    key: "fn", op: "FN", name: "函数调用", en: "fn", glyph: "ƒ", arity: 1, weight: 0,
+    hasOutput: true, variableArity: true, isCall: true, hue: "#8b5cf6",
+    desc: "调用一个自定义函数：端口数就是参数个数，权重按展开后的内部节点数计。",
+  },
   out: {
     key: "out", op: "OUT", name: "输出", en: "out", glyph: "OUT", arity: 1, weight: 0,
     hasOutput: false, isOutput: true, variableArity: true, hasName: true, hue: "#64748b",

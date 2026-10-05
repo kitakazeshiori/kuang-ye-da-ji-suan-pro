@@ -27,6 +27,7 @@ function clamp(v, lo, hi) {
 export class Editor {
   constructor(opts) {
     this.graph = opts.graph;
+    this.fnDef = opts.fnDef || (() => null);
     this.renderer = opts.renderer;
     this.canvas = opts.canvas;
     this.level = opts.level || null;
@@ -676,9 +677,17 @@ export class Editor {
     const q = this.quick;
     this.quick = null;
     if (!q) return;
-    const t = NODE_TYPES[typeKey];
+    const isFn = typeof typeKey === "string" && typeKey.startsWith("fn:");
+    const fnName = isFn ? typeKey.slice(3) : null;
+    const def = isFn ? this.fnDef(fnName) : null;
+    if (isFn && !def) {
+      this.onToast("函数「" + fnName + "」不存在", "error");
+      return;
+    }
+    const type = isFn ? "fn" : typeKey;
+    const t = NODE_TYPES[type];
     if (!t) return;
-    const node = this.graph.createNode(typeKey, q.world.x, q.world.y, {});
+    const node = this.graph.createNode(type, q.world.x, q.world.y, isFn ? { fn: fnName, arity: def.params } : {});
     this.renderer.invalidateNode(node);
 
     if (q.mode === "from-out") {
@@ -912,7 +921,7 @@ export class Editor {
     for (const id of ids) {
       const n = this.graph.get(id);
       if (!n) continue;
-      nodes.push({ id: n.id, type: n.type, x: n.x, y: n.y, value: n.value, inputValue: n.inputValue, inputs: n.inputs.slice() });
+      nodes.push({ id: n.id, type: n.type, x: n.x, y: n.y, value: n.value, inputValue: n.inputValue, fn: n.fn, inputs: n.inputs.slice() });
     }
     this.clipboard = nodes;
   }
@@ -922,7 +931,7 @@ export class Editor {
     const map = new Map();
     const created = [];
     for (const n of nodes) {
-      const nn = this.graph.createNode(n.type, n.x + dx, n.y + dy, { value: n.value, inputValue: n.inputValue, arity: n.inputs.length });
+      const nn = this.graph.createNode(n.type, n.x + dx, n.y + dy, { value: n.value, inputValue: n.inputValue, fn: n.fn, arity: n.inputs.length });
       map.set(n.id, nn.id);
       created.push(nn);
     }
@@ -952,7 +961,7 @@ export class Editor {
     for (const id of ids) {
       const n = this.graph.get(id);
       if (!n) continue;
-      nodes.push({ id: n.id, type: n.type, x: n.x, y: n.y, value: n.value, inputValue: n.inputValue, inputs: n.inputs.slice() });
+      nodes.push({ id: n.id, type: n.type, x: n.x, y: n.y, value: n.value, inputValue: n.inputValue, fn: n.fn, inputs: n.inputs.slice() });
     }
     this._pasteNodes(nodes, 28, 28, "复制 " + nodes.length + " 个节点");
   }
