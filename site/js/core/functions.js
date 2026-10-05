@@ -88,6 +88,49 @@ export function resultCandidates(graph, ids) {
   return outs.length > 0 ? outs : sinks;
 }
 
+// 收集函数参数。两类来源：
+//   1) 选区内的 I 节点：它本身保留在画布上，作为调用端参数的来源（kind "I"）；
+//   2) 从选区外引入、或干脆悬空的输入端口（kind "port"）。
+// 同一个外部来源被多个端口引用时只算一个参数；悬空端口各自算一个参数，
+// 调用节点上对应端口留空，等用户自己接线。返回 paramIndex: "节点id:端口号" -> 参数序号。
+export function collectFunctionParams(graph, ids) {
+  const S = new Set(ids);
+  const sorted = [...S].sort((a, b) => a - b);
+  const params = [];
+  const paramIndex = new Map();
+  for (const id of sorted) {
+    const n = graph.get(id);
+    if (!n || n.type !== "I") continue;
+    paramIndex.set(id + ":*", params.length);
+    params.push({ kind: "I", node: id, src: id });
+  }
+  const external = new Map(); // 外部来源节点 id -> 参数序号
+  for (const id of sorted) {
+    const n = graph.get(id);
+    if (!n || n.type === "I") continue;
+    for (let p = 0; p < n.inputs.length; p++) {
+      const src = n.inputs[p];
+      if (src !== null && S.has(src)) continue; // 选区内部连线，不是参数
+      let k;
+      if (src === null) {
+        k = params.length; // 悬空端口：单独占一个参数
+        params.push({ kind: "port", node: id, src: null });
+      } else {
+        const hit = external.get(src);
+        if (hit !== undefined) {
+          k = hit; // 同一外部来源复用同一个参数
+        } else {
+          k = params.length;
+          external.set(src, k);
+          params.push({ kind: "port", node: id, src });
+        }
+      }
+      paramIndex.set(id + ":" + p, k);
+    }
+  }
+  return { params, paramIndex };
+}
+
 // 打包：把选中节点抽成函数定义，并给出在画布上落地调用节点所需的改动计划。
 // plan.paramSources[k] 是调用节点第 k 个端口要接的画布节点（null = 悬空）；
 // plan.removed 是要被调用节点取代的节点（I 节点保留，作为参数来源）。
@@ -103,24 +146,7 @@ export function buildFunctionDef(graph, ids, name, resultId, lib) {
     if (n.type === "out") return { ok: false, error: "输出端子不能打包进函数，它是当前关卡的出口" };
   }
 
-  // 参数：先收 I 节点（它本身就是「外部给的值」），再收从选区外引入的输入端口。
-  const params = [];
-  const paramIndex = new Map();
-  for (const id of sorted) {
-    if (graph.get(id).type !== "I") continue;
-    paramIndex.set(id + ":*", params.length);
-    params.push({ kind: "I", node: id, src: id });
-  }
-  for (const id of sorted) {
-    const n = graph.get(id);
-    if (n.type === "I") continue;
-    for (let p = 0; p < n.inputs.length; p++) {
-      const src = n.inputs[p];
-      if (src !== null && S.has(src)) continue;
-      paramIndex.set(id + ":" + p, params.length);
-      params.push({ kind: "port", node: id, src });
-    }
-  }
+  const { params, paramIndex } = collectFunctionParams(graph, ids);
 
   // 出口：指向选区外的边必须来自同一个节点，否则拆掉选区会破坏其它连线。
   const outs = new Set();
@@ -184,10 +210,8 @@ export function buildFunctionDef(graph, ids, name, resultId, lib) {
     if (n.type === "I") continue;
     const nn = body.get(map.get(id));
     for (let p = 0; p < n.inputs.length; p++) {
-      const src = n.inputs[p];
-      if (src === null) continue;
-      if (S.has(src)) nn.inputs[p] = map.get(src);
-      else nn.inputs[p] = paramIds[paramIndex.get(id + ":" + p)];
+      const k = paramIndex.get(id + ":" + p);
+      nn.inputs[p] = k === undefined ? map.get(n.inputs[p]) : paramIds[k];
     }
   }
   const outNode = body.createNode("out", 0, 0, { arity: 1 });

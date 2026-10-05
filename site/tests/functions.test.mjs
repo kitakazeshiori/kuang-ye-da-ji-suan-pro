@@ -210,3 +210,67 @@ test("函数库：增删改查与 JSON 往返", () => {
   assert.equal(clone.delete("id"), true);
   assert.equal(clone.size, 0);
 });
+
+test("打包：悬空输入端口各自变成一个参数，不会有孤儿参数", () => {
+  // 三个 add，上面两个的输出接进下面那个（对应用户截图 fn4add.png 的结构）
+  const { g, n } = rebuild({
+    nodes: [
+      ["a0", "add", 0, 0],
+      ["a1", "add", 300, 0],
+      ["a2", "add", 150, 200, {}, ["a0", "a1"]],
+      ["o", "out", 150, 400, { arity: 1 }, ["a2"]],
+    ],
+  });
+  const r = buildFunctionDef(g, [n.a0.id, n.a1.id, n.a2.id], "four", null, null);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.def.params, 4); // 4 个悬空端口 = 4 个参数
+  assert.deepEqual(r.plan.paramSources, [null, null, null, null]);
+  assert.equal(r.def.weight, 7); // 4 个 I + 3 个 add
+
+  // 函数体里每个参数都能用上，且没有悬空端口（否则参数就是摆设）
+  const body = Graph.fromJSON(r.def.body);
+  const used = new Set();
+  for (const node of body.nodes.values()) for (const src of node.inputs) if (src !== null) used.add(src);
+  for (const pid of body.inputNodes().map((x) => x.id)) assert.equal(used.has(pid), true, "参数 #" + pid + " 没被使用");
+  const dangling = [];
+  for (const node of body.nodes.values()) {
+    if (node.type === "out") continue;
+    node.inputs.forEach((src, i) => {
+      if (src === null) dangling.push(node.id + ":" + i);
+    });
+  }
+  assert.deepEqual(dangling, []);
+
+  // 落地成调用节点：端口先留空，接线后展开求值 (1+2)+(3+4) = 10
+  const call = applyPlan(g, r.def, r.plan);
+  assert.equal(call.inputs.length, 4);
+  assert.deepEqual(call.inputs, [null, null, null, null]);
+  const xs = [1, 2, 3, 4].map((k) => g.createNode("I", k * 100, 600));
+  xs.forEach((x, k) => (call.inputs[k] = x.id));
+  const ex = expandGraph(g, new FunctionLibrary([r.def]));
+  assert.equal(ex.ok, true, ex.error);
+  assert.equal(ex.graph.cost(), 7);
+  assert.equal(evaluateGraph(ex.graph, ["1", "2", "3", "4"]).outputs[0].ld(), 10);
+});
+
+test("打包：同一个外部来源只算一个参数", () => {
+  const { g, n } = rebuild({
+    nodes: [
+      ["x", "I"],
+      ["m", "mul", 200, 0, {}, ["x", "x"]],
+      ["o", "out", 400, 0, { arity: 1 }, ["m"]],
+    ],
+  });
+  const r = buildFunctionDef(g, [n.m.id], "sq", null, null);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.def.params, 1);
+  assert.deepEqual(r.plan.paramSources, [n.x.id]);
+  const call = applyPlan(g, r.def, r.plan);
+  assert.equal(call.inputs.length, 1);
+  assert.equal(call.inputs[0], n.x.id);
+  assert.equal(n.o.inputs[0], call.id);
+  const ex = expandGraph(g, new FunctionLibrary([r.def]));
+  assert.equal(ex.ok, true, ex.error);
+  const v = evaluateGraph(ex.graph, ["5"]).outputs[0].ld();
+  assert.ok(Math.abs(v - 25) < 1e-9, "5*5 = " + v);
+});

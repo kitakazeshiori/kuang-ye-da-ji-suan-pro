@@ -401,14 +401,17 @@ export class App {
 
   // 工具箱：指针拖拽（桌面与触屏通用）。拖到画布松手即在落点创建，单击则放在视图中央。
   _bindPaletteDrag() {
+    if (this._paletteBound) return;
+    this._paletteBound = true;
     const list = this.dom.paletteList;
     list.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "mouse" && e.button !== 0) return;
       const btn = e.target && e.target.closest ? e.target.closest(".pnode") : null;
       if (!btn) return;
       const key = btn.dataset.key;
-      const t = NODE_TYPES[key];
-      if (!t) return;
+      const resolved = this._resolveKey(key);
+      if (!resolved) return;
+      const ghostGlyph = key.startsWith("fn:") ? "fn" : key;
       const start = { x: e.clientX, y: e.clientY };
       let ghost = null;
       let dragging = false;
@@ -421,7 +424,7 @@ export class App {
           btn.classList.add("dragging");
           ghost = document.createElement("div");
           ghost.className = "drag-ghost";
-          ghost.innerHTML = ui.glyphBox(key) + "<span>" + ui.escapeHtml(t.name) + "</span>";
+          ghost.innerHTML = ui.glyphBox(ghostGlyph) + "<span>" + ui.escapeHtml(resolved.label) + "</span>";
           document.body.appendChild(ghost);
         }
         ghost.style.left = ev.clientX + "px";
