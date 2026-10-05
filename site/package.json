@@ -1,0 +1,11 @@
+{
+  "name": "compute-graph-workshop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "旷野大计算 pro（计算图工坊）：数学计算图的可视化编辑器 / 游戏（静态站点，无构建步骤）",
+  "scripts": {
+    "dev": "python -m http.server 5188 --directory .",
+    "test": "node --test tests/"
+  }
+}

@@ -1,0 +1,17 @@
+# 本地构建产物 / 可执行文件
+/build/
+*.exe
+__pycache__/
+
+# 参考答案：保留在本地，避免公开剧透
+/ans?.txt
+
+# 调试与截图残留
+nandgame-example.png
+tools/_*
+shot-*.png
+.playwright-mcp/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
