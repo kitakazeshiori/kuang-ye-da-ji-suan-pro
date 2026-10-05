@@ -873,6 +873,21 @@ export class App {
     this.commit("展开函数调用");
     this.renderStatus();
     this.scheduleValues(true);
+    const n = (res.ids || []).length;
+    if (n === 0) {
+      ui.toast(
+        res.outSrc === null
+          ? "这个函数没有内部节点，返回值也没接线：调用节点已移除，下游端口留空"
+          : "这是直通函数（没有内部节点），已把下游直接接到它的来源上",
+        res.outSrc === null ? "error" : "ok"
+      );
+    } else if (res.outSrc === null) {
+      ui.toast("已展开 " + n + " 个节点；返回值没接线，下游端口已留空", "error");
+    } else if (res.dangling > 0) {
+      ui.toast("已展开 " + n + " 个节点，其中 " + res.dangling + " 个端口没连线（保持留空）", "ok");
+    } else {
+      ui.toast("已展开 " + n + " 个节点", "ok");
+    }
   }
 
   openFnInfo(node) {

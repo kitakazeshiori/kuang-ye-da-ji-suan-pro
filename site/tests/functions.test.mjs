@@ -274,3 +274,39 @@ test("打包：同一个外部来源只算一个参数", () => {
   const v = evaluateGraph(ex.graph, ["5"]).outputs[0].ld();
   assert.ok(Math.abs(v - 25) < 1e-9, "5*5 = " + v);
 });
+
+test("展开为节点：没连线的端口保持没连线（空展开）", () => {
+  const a = rebuild({ nodes: [["x", "I"], ["c", "C", 0, 120, { value: "2" }], ["m", "mul", 200, 0, {}, ["x", "c"]], ["o", "out", 400, 0, { arity: 1 }, ["m"]]] });
+  const ra = buildFunctionDef(a.g, [a.n.x.id, a.n.c.id, a.n.m.id], "dbl", null, null);
+  const lib = new FunctionLibrary([ra.def]);
+  const g = new Graph();
+  const call = g.createNode("fn", 0, 0, { fn: "dbl", arity: 1 }); // 端口一个都不连
+  const res = expandCallInPlace(g, call.id, lib);
+  assert.equal(res.ok, true, res.error);
+  assert.equal(res.ids.length, 2); // 常量节点和 mul 被铺出来（输入节点是参数，不铺）
+  assert.equal(g.get(res.ids[0]).type, "C");
+  assert.equal(res.dangling, 1); // mul 的参数端口没连线
+  const mul = g.get(res.outSrc);
+  assert.equal(mul.type, "mul");
+  assert.equal(mul.inputs[0], null);
+  assert.equal(mul.inputs[1], res.ids[0]);
+  assert.equal(g.has(call.id), false);
+});
+
+test("展开为节点：直通函数不会凭空消失，下游直接接到来源", () => {
+  const a = rebuild({ nodes: [["x", "I"], ["o", "out", 200, 0, { arity: 1 }, ["x"]]] });
+  const ra = buildFunctionDef(a.g, [a.n.x.id], "id", null, null);
+  const lib = new FunctionLibrary([ra.def]);
+  const g = new Graph();
+  const x = g.createNode("I");
+  const call = g.createNode("fn", 0, 0, { fn: "id", arity: 1 });
+  const o = g.createNode("out", 200, 0, { arity: 1 });
+  g.connect(x.id, call.id, 0);
+  g.connect(call.id, o.id, 0);
+  const res = expandCallInPlace(g, call.id, lib);
+  assert.equal(res.ok, true, res.error);
+  assert.deepEqual(res.ids, []); // 函数体没有内部节点
+  assert.equal(res.outSrc, x.id);
+  assert.equal(o.inputs[0], x.id); // 下游没被丢掉
+  assert.equal(g.has(call.id), false);
+});

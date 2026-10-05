@@ -342,6 +342,8 @@ export function expandGraph(graph, lib) {
 
 // 就地展开一个调用节点（写进当前画布）：把函数体铺在调用节点下方，
 // 把调用节点的下游改接到函数结果上，再删掉调用节点。
+// 允许「空展开」：参数没连线的照样展开，函数体里对应的输入端口保持留空；
+// 返回值没接线时，下游端口也留空；函数体没有内部节点（直通）时只把下游直接接到来源。
 export function expandCallInPlace(graph, callId, lib) {
   const call = graph.get(callId);
   if (!call || call.type !== "fn") return { ok: false, error: "这里不是函数调用" };
@@ -352,10 +354,12 @@ export function expandCallInPlace(graph, callId, lib) {
     return { ok: false, error: String((err && err.message) || err) };
   }
   if (call.inputs.length !== tpl.paramIds.length) {
-    return { ok: false, error: "函数「" + call.fn + "」需要 " + tpl.paramIds.length + " 个参数" };
-  }
-  for (let k = 0; k < tpl.paramIds.length; k++) {
-    if (call.inputs[k] === null) return { ok: false, error: "第 " + (k + 1) + " 个参数没有连线，无法展开" };
+    return {
+      ok: false,
+      error:
+        "函数「" + call.fn + "」需要 " + tpl.paramIds.length + " 个参数，这个调用节点有 " + call.inputs.length +
+        " 个端口（函数可能被重新打包过，删掉这个调用节点再从工具箱拖一个）",
+    };
   }
 
   let minX = Infinity;
@@ -377,8 +381,12 @@ export function expandCallInPlace(graph, callId, lib) {
     for (let p = 0; p < node.inputs.length; p++) if (node.inputs[p] === callId) consumers.push([node.id, p]);
   }
 
+  // 没连线的参数映射成 null：展开后函数体里对应的输入端口也保持没连线。
   const remap = new Map();
-  for (let k = 0; k < tpl.paramIds.length; k++) remap.set(tpl.paramIds[k], call.inputs[k]);
+  for (let k = 0; k < tpl.paramIds.length; k++) {
+    const src = call.inputs[k];
+    remap.set(tpl.paramIds[k], src === undefined ? null : src);
+  }
 
   const created = new Map();
   const skip = new Set(tpl.paramIds);
@@ -393,21 +401,24 @@ export function expandCallInPlace(graph, callId, lib) {
     created.set(tn.id, nn.id);
   }
   const newIds = [];
+  let dangling = 0;
   for (const tn of tpl.nodes) {
     if (skip.has(tn.id)) continue;
     const nn = graph.get(created.get(tn.id));
     newIds.push(nn.id);
     for (let p = 0; p < tn.inputs.length; p++) {
       const s = tn.inputs[p];
-      nn.inputs[p] = s === null ? null : created.get(s);
+      const val = s === null || !created.has(s) ? null : created.get(s);
+      nn.inputs[p] = val === undefined ? null : val;
+      if (nn.inputs[p] === null) dangling++;
     }
   }
-  const outSrc = created.get(tpl.outSrc);
+  const outSrc = tpl.outSrc === null || !created.has(tpl.outSrc) ? null : created.get(tpl.outSrc);
   for (const [nodeId, port] of consumers) {
     const node = graph.get(nodeId);
     if (node) node.inputs[port] = outSrc;
   }
   graph.removeMany([callId]);
   graph.touch();
-  return { ok: true, ids: newIds, outSrc };
+  return { ok: true, ids: newIds, outSrc, dangling };
 }
