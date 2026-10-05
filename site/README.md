@@ -1,5 +1,7 @@
 # 旷野大计算 pro · 计算图工坊
 
+在线试玩：<https://kitakazeshiori.github.io/kuang-ye-da-ji-suan-pro/>
+
 把《连续数学计算图》这道题做成可玩的**可视化计算图编辑器 / 游戏网站**。纯静态、零构建步骤，直接部署到 GitHub Pages 或 Cloudflare Pages。
 
 ## 现在有什么

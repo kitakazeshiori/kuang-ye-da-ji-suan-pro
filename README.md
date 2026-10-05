@@ -4,6 +4,8 @@
 
 纯静态站点、零构建步骤，直接部署到 GitHub Pages。**所有关卡默认解锁**，可以自由跳关、任意导入导出，方便试玩和出题。
 
+在线试玩：<https://kitakazeshiori.github.io/kuang-ye-da-ji-suan-pro/>
+
 ## 关卡
 
 16 个任务 + 沙盒，按难度排序：
