@@ -42,74 +42,122 @@ export function prepare(graph) {
   return { plan, out: outNodes[0] };
 }
 
+const toReal = (x) => (x instanceof Real ? x : parseDecimal(x));
+
+// 执行一个节点。inputs 是解析好的输入数组，pos.i 是下一个待读输入的下标。
+// 成功返回 { ok:true, value }，失败返回 fail(...)。
+function evalNode(node, values, inputs, pos) {
+  if (node.type === "I") {
+    if (pos.i >= inputs.length) return fail("inputs", node.id, "输入节点多于测试输入");
+    return { ok: true, value: inputs[pos.i++] };
+  }
+  if (node.type === "C") {
+    const text = String(node.value === undefined || node.value === null ? "" : node.value).trim();
+    if (!DEC_RE.test(text)) return fail("bad-const", node.id, "常数不是合法十进制：" + text);
+    const value = parseDecimal(text);
+    if (MAX_CONST.cmp(value.abs()) < 0) return fail("const-range", node.id, "常数绝对值超过 1e6");
+    return { ok: true, value };
+  }
+  const args = [];
+  for (const s of node.inputs) {
+    if (s === null) return fail("dangling", node.id, "节点 #" + node.id + " 有输入端未连线");
+    const v = values.get(s);
+    if (v === undefined) return fail("order", node.id, "节点 #" + node.id + " 引用了非拓扑序节点");
+    args.push(v);
+  }
+  let value;
+  switch (node.type) {
+    case "add":
+      value = args[0].add(args[1]);
+      break;
+    case "neg":
+      value = args[0].neg();
+      break;
+    case "mul":
+      value = args[0].mul(args[1]);
+      break;
+    case "wire":
+      value = args[0]; // 空节点：输出等于输入
+      break;
+    case "sin":
+    case "cos":
+      if (!(args[0].abs().cmp(TRIG_LIMIT) < 0)) return fail("trig-range", node.id, "三角函数自变量绝对值不小于 1e6");
+      value = node.type === "sin" ? sinR(args[0]) : cosR(args[0]);
+      break;
+    case "exp":
+      if (!(args[0].abs().cmp(EXP_LIMIT) < 0)) return fail("exp-range", node.id, "exp 自变量绝对值不小于 100");
+      value = expR(args[0]);
+      break;
+    case "sqrt":
+      if (args[0].negative()) return fail("sqrt-negative", node.id, "负数开平方");
+      value = sqrtR(args[0]);
+      break;
+    default:
+      return fail("type", node.id, "未知操作：" + node.type);
+  }
+  return { ok: true, value };
+}
+
+// 收尾：核对输入数量、读取 OUT。values 里带着每个节点（含中间值）的求值结果。
+// out 为 null 表示「不要求输出端子」（手动求值调试中间值用）。
+function finishPlan(out, values, pos, inputs) {
+  if (pos.i !== inputs.length) return fail("inputs", null, "输入节点数量与测试输入数量不一致");
+  const outputs = [];
+  if (out) {
+    for (const s of out.inputs) {
+      if (s === null) return fail("dangling", out.id, "输出端未连线");
+      const v = values.get(s);
+      if (v === undefined) return fail("order", out.id, "输出引用了不可用节点");
+      outputs.push(v);
+    }
+  }
+  return { ok: true, outputs, values };
+}
+
 // 单次求值。inputValues 可以是字符串数组或 Real 数组。
 export function evaluatePlan(plan, out, inputValues) {
-  const inputs = inputValues.map((x) => (x instanceof Real ? x : parseDecimal(x)));
+  const inputs = inputValues.map(toReal);
   const values = new Map();
-  let p = 0;
+  const pos = { i: 0 };
+  for (const { node } of plan) {
+    const r = evalNode(node, values, inputs, pos);
+    if (!r.ok) return r;
+    if (MAX_VALUE.cmp(r.value.abs()) < 0) return fail("oversized", node.id, "节点 #" + node.id + " 的中间值绝对值超过 1e60");
+    values.set(node.id, r.value);
+  }
+  return finishPlan(out, values, pos, inputs);
+}
 
-  for (const { node, t } of plan) {
-    let value;
-    if (node.type === "I") {
-      if (p >= inputs.length) return fail("inputs", node.id, "输入节点多于测试输入");
-      value = inputs[p++];
-    } else if (node.type === "C") {
-      const text = String(node.value === undefined || node.value === null ? "" : node.value).trim();
-      if (!DEC_RE.test(text)) return fail("bad-const", node.id, "常数不是合法十进制：" + text);
-      value = parseDecimal(text);
-      if (MAX_CONST.cmp(value.abs()) < 0) return fail("const-range", node.id, "常数绝对值超过 1e6");
-    } else {
-      const args = [];
-      for (const s of node.inputs) {
-        if (s === null) return fail("dangling", node.id, "节点 #" + node.id + " 有输入端未连线");
-        const v = values.get(s);
-        if (v === undefined) return fail("order", node.id, "节点 #" + node.id + " 引用了非拓扑序节点");
-        args.push(v);
-      }
-      switch (node.type) {
-        case "add":
-          value = args[0].add(args[1]);
-          break;
-        case "neg":
-          value = args[0].neg();
-          break;
-        case "mul":
-          value = args[0].mul(args[1]);
-          break;
-        case "wire":
-          value = args[0]; // 空节点：输出等于输入
-          break;
-        case "sin":
-        case "cos":
-          if (!(args[0].abs().cmp(TRIG_LIMIT) < 0)) return fail("trig-range", node.id, "三角函数自变量绝对值不小于 1e6");
-          value = node.type === "sin" ? sinR(args[0]) : cosR(args[0]);
-          break;
-        case "exp":
-          if (!(args[0].abs().cmp(EXP_LIMIT) < 0)) return fail("exp-range", node.id, "exp 自变量绝对值不小于 100");
-          value = expR(args[0]);
-          break;
-        case "sqrt":
-          if (args[0].negative()) return fail("sqrt-negative", node.id, "负数开平方");
-          value = sqrtR(args[0]);
-          break;
-        default:
-          return fail("type", node.id, "未知操作：" + node.type);
-      }
+// 让出一帧（没有 requestAnimationFrame 的环境退回 setTimeout）。
+function nextTick() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+
+// 分片求值（异步）：每 chunkSize 个节点让出一次事件循环，超大图手动求值也不会卡死界面。
+// opts.onProgress(done, total) 用来显示进度。语义与 evaluatePlan 完全一致。
+export async function evaluatePlanAsync(plan, out, inputValues, opts = {}) {
+  const chunkSize = Math.max(200, Math.round(opts.chunkSize || 4000));
+  const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+  const inputs = inputValues.map(toReal);
+  const values = new Map();
+  const pos = { i: 0 };
+  let done = 0;
+  for (const { node } of plan) {
+    const r = evalNode(node, values, inputs, pos);
+    if (!r.ok) return r;
+    if (MAX_VALUE.cmp(r.value.abs()) < 0) return fail("oversized", node.id, "节点 #" + node.id + " 的中间值绝对值超过 1e60");
+    values.set(node.id, r.value);
+    done++;
+    if (done % chunkSize === 0) {
+      if (onProgress) onProgress(done, plan.length);
+      await nextTick();
     }
-    if (MAX_VALUE.cmp(value.abs()) < 0) return fail("oversized", node.id, "节点 #" + node.id + " 的中间值绝对值超过 1e60");
-    values.set(node.id, value);
   }
-
-  if (p !== inputs.length) return fail("inputs", null, "输入节点数量与测试输入数量不一致");
-  const outputs = [];
-  for (const s of out.inputs) {
-    if (s === null) return fail("dangling", out.id, "输出端未连线");
-    const v = values.get(s);
-    if (v === undefined) return fail("order", out.id, "输出引用了不可用节点");
-    outputs.push(v);
-  }
-  // values 里带着每个节点（含中间值）的求值结果，界面可以查看任意节点的内部数值。
-  return { ok: true, outputs, values };
+  if (onProgress) onProgress(plan.length, plan.length);
+  return finishPlan(out, values, pos, inputs);
 }
 
 // 便捷入口：一次性求值（图 + 输入）。

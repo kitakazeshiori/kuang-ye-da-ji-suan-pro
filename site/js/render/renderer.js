@@ -109,6 +109,8 @@ export class Renderer {
     this._indexVersion = -1;
     this._pendingFull = true;
     this._pendingRects = new Set();
+    this._wires = null; // 连线列表缓存（按 graph.version 失效）
+    this._wiresVersion = -1;
     this._font = "";
     this._lastVisible = 0;
   }
@@ -129,11 +131,15 @@ export class Renderer {
     this._pendingFull = true;
     this._inputIndex = new Map();
     this._indexVersion = -1;
+    this._wires = null;
+    this._wiresVersion = -1;
   }
 
   invalidateAll() {
     this.grid.clear();
     this._pendingFull = true;
+    this._wires = null;
+    this._wiresVersion = -1;
   }
 
   invalidateNode(node) {
@@ -225,7 +231,7 @@ export class Renderer {
     if (scale > 0.08) this._drawGrid(vis);
     const ids = this.grid.querySorted(vis.x, vis.y, vis.w, vis.h, []);
     this._lastVisible = ids.length;
-    this._drawWires(ids);
+    this._drawWires();
     this._drawNodes(ids);
     this._drawPending();
     this._drawMarquee();
@@ -255,60 +261,89 @@ export class Renderer {
     return t ? t.hue : this.theme.port;
   }
 
-  // 收集要画的连线：可见节点的入线 + 出线。
-  // 出线也要收，否则「可见节点 -> 画布外节点」那条线会整条不显示。
-  _collectWires(ids) {
-    const graph = this.graph;
-    const seen = new Set();
-    const wires = [];
-    const add = (dstId, port) => {
-      const dst = graph.get(dstId);
-      if (!dst) return;
-      const srcId = dst.inputs[port];
-      if (srcId === null || srcId === undefined) return;
-      const src = graph.get(srcId);
-      if (!src) return;
-      const key = dstId + ":" + port;
-      if (seen.has(key)) return;
-      seen.add(key);
-      wires.push({ src, dst, port, key });
-    };
-    for (const id of ids) {
-      const node = graph.get(id);
-      if (!node) continue;
-      for (let i = 0; i < node.inputs.length; i++) add(id, i);
-      for (const c of graph.consumersOf(id)) {
-        const cn = graph.get(c);
-        if (!cn) continue;
-        for (let i = 0; i < cn.inputs.length; i++) if (cn.inputs[i] === id) add(c, i);
+  // 连线列表缓存：只在图结构 / 坐标变化（graph.version 变了）时重建一次。
+  // 端点坐标、节点宽度都随 version 更新，所以这个缓存是自洽的。
+  _wireList() {
+    const g = this.graph;
+    if (!g) return [];
+    if (this._wires && this._wiresVersion === g.version) return this._wires;
+    const list = [];
+    for (const node of g.nodes.values()) {
+      for (let i = 0; i < node.inputs.length; i++) {
+        const srcId = node.inputs[i];
+        if (srcId === null || srcId === undefined) continue;
+        const src = g.get(srcId);
+        if (!src) continue;
+        const p = wirePath(portPosition(src, "out", 0), portPosition(node, "in", i));
+        // 三次贝塞尔一定落在 4 个控制点的凸包内，用它们的包围盒做裁剪就够了。
+        list.push({
+          src,
+          key: node.id + ":" + i,
+          p,
+          x0: Math.min(p.x1, p.c1x, p.c2x, p.x2),
+          y0: Math.min(p.y1, p.c1y, p.c2y, p.y2),
+          x1: Math.max(p.x1, p.c1x, p.c2x, p.x2),
+          y1: Math.max(p.y1, p.c1y, p.c2y, p.y2),
+        });
       }
     }
-    return wires;
+    this._wires = list;
+    this._wiresVersion = g.version;
+    return list;
   }
 
-  _drawWires(ids) {
+  // 常态渲染所有连线：不只画「可见节点的连线」，两端都在画布外、只是跨过视野的线也要画，
+  // 否则顺着线找不到远处的节点。每帧只对缓存做一次廉价的包围盒裁剪。
+  _drawWires() {
     const ctx = this.ctx;
     const scale = this.view.scale;
     // 缩得太小时连线不足一像素，直接跳过，省掉大量 bezier 绘制。
     if (scale < 0.06) return;
-    const thin = 1.6;
-    const wires = this._collectWires(ids);
-    // 先画普通连线，再画高亮的，避免被盖住。
-    for (let pass = 0; pass < 2; pass++) {
-      for (const w of wires) {
-        const hot = this.activeWires.has(w.key) || this.selectedWires.has(w.key);
-        if (pass === 0 && hot) continue;
-        if (pass === 1 && !hot) continue;
-        const p = wirePath(portPosition(w.src, "out", 0), portPosition(w.dst, "in", w.port));
-        ctx.beginPath();
+    const vis = this.visibleRect();
+    const visX1 = vis.x + vis.w;
+    const visY1 = vis.y + vis.h;
+    const wires = this._wireList();
+    // 可见的连续同色线合成一条 Path：几千条线也只切换几次绘制状态。
+    const groups = new Map();
+    const hot = [];
+    for (const w of wires) {
+      if (w.x1 < vis.x || w.x0 > visX1 || w.y1 < vis.y || w.y0 > visY1) continue;
+      if (this.activeWires.has(w.key) || this.selectedWires.has(w.key)) {
+        hot.push(w);
+        continue;
+      }
+      const hue = this._wireColor(w.src);
+      let arr = groups.get(hue);
+      if (!arr) {
+        arr = [];
+        groups.set(hue, arr);
+      }
+      arr.push(w);
+    }
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 1.6;
+    for (const [hue, arr] of groups) {
+      ctx.beginPath();
+      for (const w of arr) {
+        const p = w.p;
         ctx.moveTo(p.x1, p.y1);
         ctx.bezierCurveTo(p.c1x, p.c1y, p.c2x, p.c2y, p.x2, p.y2);
-        ctx.lineWidth = hot ? 3 : thin;
-        ctx.strokeStyle = hot ? this.theme.accent : this._wireColor(w.src);
-        ctx.globalAlpha = hot ? 1 : 0.55;
-        ctx.stroke();
-        ctx.globalAlpha = 1;
       }
+      ctx.strokeStyle = hue;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    // 高亮（选中 / 正在连）的线单独一批，盖在普通连线上面。
+    if (hot.length > 0) {
+      ctx.beginPath();
+      for (const w of hot) {
+        const p = w.p;
+        ctx.moveTo(p.x1, p.y1);
+        ctx.bezierCurveTo(p.c1x, p.c1y, p.c2x, p.c2y, p.x2, p.y2);
+      }
+      ctx.strokeStyle = this.theme.accent;
+      ctx.lineWidth = 3;
+      ctx.stroke();
     }
   }
 

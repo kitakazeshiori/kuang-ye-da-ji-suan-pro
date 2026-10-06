@@ -10,7 +10,7 @@ import {
 import { analyze, checkConstText } from "../core/validate.js";
 import * as progress from "../core/progress.js";
 import { GraphFormatError, fromProblemText, toProblemText } from "../core/serialize.js";
-import { evaluateGraph, loadVectors, gradeAgainstVectorsAsync } from "../core/evaluate.js";
+import { evaluateGraph, evaluatePlanAsync, loadVectors, prepare, gradeAgainstVectorsAsync } from "../core/evaluate.js";
 import { History } from "../core/history.js";
 import { NODE_TYPES, TYPE_ORDER } from "../core/types.js";
 import { LEVELS, SANDBOX, TASKS, getLevel } from "../core/levels.js";
@@ -50,6 +50,7 @@ export class App {
       valKind: document.getElementById("val-kind"),
       nodeMenu: document.getElementById("node-menu"),
       btnVal: document.getElementById("btn-val"),
+      btnEval: document.getElementById("btn-eval"),
       weightLeft: document.getElementById("weight-left"),
       btnProblem: document.getElementById("btn-problem"),
     };
@@ -551,6 +552,7 @@ export class App {
     if (importBtn) importBtn.addEventListener("click", () => this.showImport());
     document.getElementById("btn-export").addEventListener("click", () => this.showExport());
     document.getElementById("btn-clear").addEventListener("click", () => this.clearCanvas());
+    if (this.dom.btnEval) this.dom.btnEval.addEventListener("click", () => this.manualEvaluate());
     this.dom.check.addEventListener("click", () => this.runCheck());
     this.dom.statCheck.addEventListener("click", () => this.runCheck());
   }
@@ -1097,6 +1099,86 @@ export class App {
     this.scheduleSave();
   }
 
+  // 手动求值：和实时求值同一套语义，但不设规模上限、分片让出事件循环，专供超大图调试。
+  async manualEvaluateNow(onProgress) {
+    const eff = this.effective();
+    if (!eff.ok) return { ok: false, error: { message: "函数展开失败：" + eff.error } };
+    const g = eff.graph;
+    let prep = prepare(g);
+    if (prep.error && prep.error.code === "out") {
+      // 调试用：没有输出端子（或不止一个）也允许算一遍，只是拿不到 outputs。
+      const order = g.topoOrder();
+      if (order === null) return { ok: false, error: { code: "cycle", message: "图中存在环，无法求值" } };
+      const plan = [];
+      for (const id of order) {
+        const node = g.get(id);
+        const t = NODE_TYPES[node.type];
+        if (!t) return { ok: false, error: { code: "type", nodeId: id, message: "未知节点类型：" + node.type } };
+        if (t.isOutput) continue;
+        plan.push({ node, t });
+      }
+      prep = { plan, out: null };
+    }
+    if (prep.error) return { ok: false, error: prep.error };
+    const inputs = g.inputNodes().map((n) => (n.inputValue === undefined ? "0" : n.inputValue));
+    let res;
+    try {
+      res = await evaluatePlanAsync(prep.plan, prep.out, inputs, { onProgress });
+    } catch (err) {
+      return { ok: false, error: { message: String((err && err.message) || err) } };
+    }
+    // 调用节点在展开图里没有对应节点，把它的结果值借过来，数值面板照样能看。
+    if (res.ok && eff.fnMap && eff.fnMap.size > 0) {
+      for (const [callId, srcId] of eff.fnMap) {
+        const v = res.values.get(srcId);
+        if (v !== undefined) res.values.set(callId, v);
+      }
+    }
+    return res;
+  }
+
+  async manualEvaluate() {
+    const btn = this.dom.btnEval;
+    if (!btn || this._evalBusy) return;
+    this._evalBusy = true;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.textContent = "求值…";
+    // 先让浏览器把按钮状态画出来，再开始算。
+    await new Promise((resolve) => (typeof requestAnimationFrame === "function" ? requestAnimationFrame(() => resolve()) : setTimeout(resolve, 0)));
+    const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
+    let res;
+    try {
+      res = await this.manualEvaluateNow((done, total) => {
+        btn.textContent = "求值 " + Math.round((done / total) * 100) + "%";
+      });
+    } catch (err) {
+      res = { ok: false, error: { message: String((err && err.message) || err) } };
+    }
+    const ms = Math.round((typeof performance !== "undefined" ? performance.now() : Date.now()) - t0);
+    this._evalBusy = false;
+    btn.disabled = false;
+    btn.classList.remove("busy");
+    btn.textContent = "求值";
+    if (!res.ok) {
+      this._values = null;
+      this._valError = (res.error && res.error.message) || "求值失败";
+      this.renderer.setNodeValues(null);
+      this.renderSelection();
+      ui.toast("求值失败：" + this._valError, "error");
+      return;
+    }
+    this._values = res.values;
+    this._valError = null;
+    this.renderer.setNodeValues(this._values);
+    this.renderSelection();
+    const secs = ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms + " ms";
+    ui.toast(
+      "已求值 " + ui.formatInt(res.values.size) + " 个节点" + (res.outputs.length ? "（" + res.outputs.length + " 项输出）" : "（无输出端子）") + "，用时 " + secs,
+      "ok"
+    );
+  }
+
   scheduleValues(force = false) {
     if (force) this._valKey = null;
     window.clearTimeout(this._valTimer);
@@ -1119,7 +1201,7 @@ export class App {
         ok: false,
         error: {
           message:
-            "图较大（展开后 " + ui.formatInt(g.size) + " 个节点），已暂停实时求值；点「运行检查」查看结果。",
+            "图较大（展开后 " + ui.formatInt(g.size) + " 个节点），已暂停实时求值；点上方「求值」按钮手动算一次，或用「运行检查」。",
         },
       };
     }

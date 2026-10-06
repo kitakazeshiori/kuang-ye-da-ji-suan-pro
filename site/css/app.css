@@ -192,6 +192,15 @@ body {
   cursor: default;
 }
 
+/* 手动求值进行中：别用「不可用」的灰，改成高亮，让用户知道在算 */
+.tbtn.busy:disabled {
+  opacity: 1;
+  cursor: progress;
+  background: var(--panel-3);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .tbtn.wide {
   padding: 0 10px;
 }

@@ -18,6 +18,7 @@ import {
   withinTolerance,
   prepare,
   evaluatePlan,
+  evaluatePlanAsync,
 } from "../js/core/evaluate.js";
 import { TASKS } from "../js/core/levels.js";
 import {
@@ -241,4 +242,42 @@ test("prepare + evaluatePlan 可复用同一张图的拓扑序", (t) => {
   assert.ok(r.ok);
   assert.ok(withinTolerance(r.outputs[0], parseDecimal(vectors.task3.cases[0].expected[0])));
   assert.equal(typeof formatReal(r.outputs[0]), "string");
+});
+
+test("分片求值：与同步求值完全一致，并能分片让出事件循环", async () => {
+  const g = new Graph();
+  const x = g.createNode("I");
+  let cur = x.id;
+  for (let i = 0; i < 300; i++) {
+    const n = g.createNode("neg");
+    g.connect(cur, n.id, 0);
+    cur = n.id;
+  }
+  const o = g.createNode("out", 0, 0, { arity: 1 });
+  g.connect(cur, o.id, 0);
+
+  const prep = prepare(g);
+  const sync = evaluatePlan(prep.plan, prep.out, ["1.5"]);
+  assert.equal(sync.ok, true, sync.error && sync.error.message);
+
+  const progress = [];
+  const asyncRes = await evaluatePlanAsync(prep.plan, prep.out, ["1.5"], {
+    chunkSize: 200,
+    onProgress: (done, total) => progress.push([done, total]),
+  });
+  assert.equal(asyncRes.ok, true, asyncRes.error && asyncRes.error.message);
+  assert.equal(String(asyncRes.outputs[0]), String(sync.outputs[0]));
+  assert.deepEqual(
+    [...asyncRes.values.keys()].sort((a, b) => a - b),
+    [...sync.values.keys()].sort((a, b) => a - b)
+  );
+  // 301 个节点 / 每片 200 → 中途让出一次，收尾再报一次
+  assert.deepEqual(progress[0], [200, prep.plan.length]);
+  assert.deepEqual(progress[progress.length - 1], [prep.plan.length, prep.plan.length]);
+
+  // 手动求值允许没有输出端子（调试中间值）
+  const noOut = await evaluatePlanAsync(prep.plan, null, ["1.5"], {});
+  assert.equal(noOut.ok, true, noOut.error && noOut.error.message);
+  assert.deepEqual(noOut.outputs, []);
+  assert.equal(noOut.values.size, sync.values.size);
 });
