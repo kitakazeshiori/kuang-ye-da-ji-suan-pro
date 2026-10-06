@@ -34,6 +34,7 @@ function textWidth(s, per) {
 export function nodeWidth(node) {
   const t = NODE_TYPES[node.type];
   if (!t) return MIN_W;
+  if (node.type === "wire") return 44; // 中转节点：窄空框，不占地方
   let w;
   if (node.type === "C") w = 30 + textWidth(shortText(node.value, 26), 7.6);
   else if (node.type === "I" || node.type === "out") w = 42 + textWidth("#" + nameOf(node), 8.6) + VALUE_W;
@@ -79,6 +80,7 @@ export function nodeLabel(node) {
   if (node.type === "out") return { title: "#" + nameOf(node), accent: t.hue, weight: 0 };
   if (node.type === "C") return { title: shortText(node.value, 22), accent: t.hue, weight: t.weight };
   if (node.type === "fn") return { title: "ƒ " + (node.fn || "?"), accent: t.hue, weight: 0 };
+  if (node.type === "wire") return { title: "", accent: t.hue, weight: 0 }; // 空节点不写标签
   return { title: t.en || t.name, accent: t.hue, weight: t.weight };
 }
 

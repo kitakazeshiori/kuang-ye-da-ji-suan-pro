@@ -302,7 +302,7 @@ test("关卡数据完整", () => {
   }
   assert.equal(getLevel("nope").key, "sandbox");
   assert.equal(SANDBOX.outputs, null);
-  assert.equal(TYPE_ORDER.length, 10);
+  assert.equal(TYPE_ORDER.length, 11);
 });
 
 test("真实 std 图：权重与 README 一致，往返稳定", (t) => {

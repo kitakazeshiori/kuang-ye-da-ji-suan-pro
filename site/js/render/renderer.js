@@ -255,39 +255,59 @@ export class Renderer {
     return t ? t.hue : this.theme.port;
   }
 
+  // 收集要画的连线：可见节点的入线 + 出线。
+  // 出线也要收，否则「可见节点 -> 画布外节点」那条线会整条不显示。
+  _collectWires(ids) {
+    const graph = this.graph;
+    const seen = new Set();
+    const wires = [];
+    const add = (dstId, port) => {
+      const dst = graph.get(dstId);
+      if (!dst) return;
+      const srcId = dst.inputs[port];
+      if (srcId === null || srcId === undefined) return;
+      const src = graph.get(srcId);
+      if (!src) return;
+      const key = dstId + ":" + port;
+      if (seen.has(key)) return;
+      seen.add(key);
+      wires.push({ src, dst, port, key });
+    };
+    for (const id of ids) {
+      const node = graph.get(id);
+      if (!node) continue;
+      for (let i = 0; i < node.inputs.length; i++) add(id, i);
+      for (const c of graph.consumersOf(id)) {
+        const cn = graph.get(c);
+        if (!cn) continue;
+        for (let i = 0; i < cn.inputs.length; i++) if (cn.inputs[i] === id) add(c, i);
+      }
+    }
+    return wires;
+  }
+
   _drawWires(ids) {
     const ctx = this.ctx;
-    const graph = this.graph;
     const scale = this.view.scale;
     // 缩得太小时连线不足一像素，直接跳过，省掉大量 bezier 绘制。
     if (scale < 0.06) return;
     const thin = 1.6;
+    const wires = this._collectWires(ids);
     // 先画普通连线，再画高亮的，避免被盖住。
     for (let pass = 0; pass < 2; pass++) {
-      for (const id of ids) {
-        const node = graph.get(id);
-        if (!node) continue;
-        for (let i = 0; i < node.inputs.length; i++) {
-          const srcId = node.inputs[i];
-          if (srcId === null) continue;
-          const src = graph.get(srcId);
-          if (!src) continue;
-          const key = id + ":" + i;
-          const active = this.activeWires.has(key);
-          const selected = this.selectedWires.has(key);
-          const hot = active || selected;
-          if (pass === 0 && hot) continue;
-          if (pass === 1 && !hot) continue;
-          const p = wirePath(portPosition(src, "out", 0), portPosition(node, "in", i));
-          ctx.beginPath();
-          ctx.moveTo(p.x1, p.y1);
-          ctx.bezierCurveTo(p.c1x, p.c1y, p.c2x, p.c2y, p.x2, p.y2);
-          ctx.lineWidth = hot ? 3 : thin;
-          ctx.strokeStyle = hot ? this.theme.accent : this._wireColor(src);
-          ctx.globalAlpha = hot ? 1 : 0.55;
-          ctx.stroke();
-          ctx.globalAlpha = 1;
-        }
+      for (const w of wires) {
+        const hot = this.activeWires.has(w.key) || this.selectedWires.has(w.key);
+        if (pass === 0 && hot) continue;
+        if (pass === 1 && !hot) continue;
+        const p = wirePath(portPosition(w.src, "out", 0), portPosition(w.dst, "in", w.port));
+        ctx.beginPath();
+        ctx.moveTo(p.x1, p.y1);
+        ctx.bezierCurveTo(p.c1x, p.c1y, p.c2x, p.c2y, p.x2, p.y2);
+        ctx.lineWidth = hot ? 3 : thin;
+        ctx.strokeStyle = hot ? this.theme.accent : this._wireColor(w.src);
+        ctx.globalAlpha = hot ? 1 : 0.55;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
       }
     }
   }

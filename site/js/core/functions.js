@@ -10,6 +10,7 @@
 //     函数体复制出来的节点用更大的新 id，互不冲突。
 import { Graph } from "./graph.js";
 import { NODE_TYPES } from "./types.js";
+import { nodeWidth, nodeHeight } from "./geometry.js";
 
 export const FN_NAME_RE = /^[^\s]{1,24}$/;
 
@@ -18,6 +19,7 @@ export class FunctionLibrary {
     this.map = new Map();
     this.version = 0;
     for (const d of defs) this._put(d);
+    this.recomputeWeights();
   }
 
   _put(d) {
@@ -27,7 +29,7 @@ export class FunctionLibrary {
     this.map.set(String(d.name), {
       name: String(d.name),
       params: body.inputNodes().length,
-      weight: d.weight === undefined ? body.cost() : Math.max(0, d.weight | 0),
+      weight: bodyWeight(body, this), // 参数 I 节点不计权重，展开时才看得出来
       body: d.body,
     });
   }
@@ -50,8 +52,24 @@ export class FunctionLibrary {
   set(def) {
     const prev = this.map.get(def.name);
     this._put(def);
+    this.recomputeWeights();
     this.version++;
     return prev;
+  }
+
+  // 函数库里的 weight 只用于展示（真正的权重按展开后的平图统计）。
+  // 函数体引用了别的函数时，等库装完再重算一遍，免得受加载顺序影响。
+  recomputeWeights() {
+    let changed = false;
+    for (const d of this.map.values()) {
+      const w = bodyWeight(Graph.fromJSON(d.body), this);
+      if (w !== d.weight) {
+        d.weight = w;
+        changed = true;
+      }
+    }
+    if (changed) this.version++;
+    return changed;
   }
   delete(name) {
     const ok = this.map.delete(String(name));
@@ -129,6 +147,28 @@ export function collectFunctionParams(graph, ids) {
     }
   }
   return { params, paramIndex };
+}
+
+// 函数权重 = 展开一次调用会新增的权重。参数对应的 I 节点在展开时被跳过
+//（调用端的值直接透传进函数体），所以它们不计权重。
+// lib 里有它引用的其它函数时按展开后的平图统计；展开不了就退回函数体自身。
+export function bodyWeight(body, lib) {
+  const params = new Set(body.inputNodes().map((n) => n.id));
+  let g = body;
+  if (lib) {
+    const ex = expandGraph(body, lib);
+    if (ex.ok) g = ex.graph;
+  }
+  const expanded = g !== body;
+  let w = 0;
+  for (const n of g.nodes.values()) {
+    if (params.has(n.id)) continue;
+    const t = NODE_TYPES[n.type];
+    if (!t) continue;
+    if (!expanded && t.isCall && lib && lib.get(n.fn)) w += lib.get(n.fn).weight;
+    else w += t.weight;
+  }
+  return w;
 }
 
 // 打包：把选中节点抽成函数定义，并给出在画布上落地调用节点所需的改动计划。
@@ -217,11 +257,7 @@ export function buildFunctionDef(graph, ids, name, resultId, lib) {
   const outNode = body.createNode("out", 0, 0, { arity: 1 });
   outNode.inputs[0] = map.get(result);
 
-  const def = { name: fnName, params: params.length, weight: body.cost(), body: body.toJSON() };
-  if (lib) {
-    const ex = expandGraph(body, lib);
-    if (ex.ok) def.weight = ex.graph.cost();
-  }
+  const def = { name: fnName, params: params.length, weight: bodyWeight(body, lib), body: body.toJSON() };
 
   return {
     ok: true,
@@ -362,18 +398,28 @@ export function expandCallInPlace(graph, callId, lib) {
     };
   }
 
+  // 原地展开：把函数体的包围盒中心对到调用节点中心，不要把整团挪到下面去。
   let minX = Infinity;
   let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  const paramSet = new Set(tpl.paramIds); // 参数不落地，算包围盒时要排除
   for (const tn of tpl.nodes) {
+    if (paramSet.has(tn.id)) continue;
+    const nw = NODE_TYPES[tn.type] ? nodeWidth(tn) : 150;
     if (tn.x < minX) minX = tn.x;
     if (tn.y < minY) minY = tn.y;
+    if (tn.x + nw > maxX) maxX = tn.x + nw;
+    if (tn.y + nodeHeight() > maxY) maxY = tn.y + nodeHeight();
   }
   if (!Number.isFinite(minX)) {
     minX = 0;
+    maxX = 0;
     minY = 0;
+    maxY = 0;
   }
-  const dx = call.x - minX;
-  const dy = call.y + 110 - minY;
+  const dx = Math.round(call.x + nodeWidth(call) / 2 - (minX + maxX) / 2);
+  const dy = Math.round(call.y + nodeHeight() / 2 - (minY + maxY) / 2);
 
   // 先记下调用节点的下游，再铺函数体。
   const consumers = [];

@@ -43,6 +43,11 @@ export const NODE_TYPES = {
     hasOutput: true, variableArity: true, isCall: true, hue: "#8b5cf6",
     desc: "调用一个自定义函数：端口数就是参数个数，权重按展开后的内部节点数计。",
   },
+  wire: {
+    key: "wire", op: "=", name: "中转", en: "=", glyph: "=", arity: 1, weight: 0,
+    hasOutput: true, hue: "#94a3b8",
+    desc: "空节点：输出 = 输入，不计权重（W0），只用来把线理清楚。导出时会被省略。",
+  },
   out: {
     key: "out", op: "OUT", name: "输出", en: "out", glyph: "OUT", arity: 1, weight: 0,
     hasOutput: false, isOutput: true, variableArity: true, hasName: true, hue: "#64748b",
@@ -51,7 +56,7 @@ export const NODE_TYPES = {
 };
 
 // 面板顺序：先输入/常数，再算术，再初等函数，最后输出。
-export const TYPE_ORDER = ["I", "C", "add", "neg", "mul", "sin", "cos", "exp", "sqrt", "out"];
+export const TYPE_ORDER = ["I", "C", "add", "neg", "mul", "sin", "cos", "exp", "sqrt", "wire", "out"];
 
 export const MAX_NODES = 180000;
 export const MAX_REFS = 300000;

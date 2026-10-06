@@ -76,6 +76,9 @@ export function evaluatePlan(plan, out, inputValues) {
         case "mul":
           value = args[0].mul(args[1]);
           break;
+        case "wire":
+          value = args[0]; // 空节点：输出等于输入
+          break;
         case "sin":
         case "cos":
           if (!(args[0].abs().cmp(TRIG_LIMIT) < 0)) return fail("trig-range", node.id, "三角函数自变量绝对值不小于 1e6");

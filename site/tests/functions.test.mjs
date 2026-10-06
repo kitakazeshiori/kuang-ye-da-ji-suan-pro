@@ -11,6 +11,7 @@ import {
 } from "../js/core/functions.js";
 import { evaluateGraph } from "../js/core/evaluate.js";
 import { toProblemText } from "../js/core/serialize.js";
+import { nodeWidth, nodeHeight } from "../js/core/geometry.js";
 
 // 模拟 App.applyPack：把打包计划落到画布上，返回调用节点。
 function applyPlan(g, def, plan) {
@@ -50,7 +51,7 @@ test("打包：x*2 抽成函数后就地变成调用节点，展开后数值与�
   const r = buildFunctionDef(g, [n.x.id, n.c.id, n.m.id], "dbl", null, null);
   assert.equal(r.ok, true, r.error);
   assert.equal(r.def.params, 1);
-  assert.equal(r.def.weight, 6); // I + C + mul
+  assert.equal(r.def.weight, 5); // C + mul（参数 I 不算权重）
   assert.deepEqual(r.plan.paramSources, [n.x.id]);
   assert.deepEqual(r.plan.removed.slice().sort((a, b) => a - b), [n.c.id, n.m.id].sort((a, b) => a - b));
 
@@ -74,7 +75,7 @@ test("打包：输入节点本身就是结果时得到恒等函数", () => {
   const r = buildFunctionDef(g, [n.x.id], "id", null, null);
   assert.equal(r.ok, true, r.error);
   assert.equal(r.def.params, 1);
-  assert.equal(r.def.weight, 1);
+  assert.equal(r.def.weight, 0); // 恒等函数：展开不新增任何节点
   assert.deepEqual(r.plan.removed, []);
   const call = applyPlan(g, r.def, r.plan);
   assert.equal(n.o.inputs[0], call.id);
@@ -91,8 +92,8 @@ test("展开：函数可以调用别的函数，W 按展开后的节点数计", 
   const b = rebuild({ nodes: [["x", "I"], ["c", "C", 0, 120, { value: "3" }], ["f", "fn", 200, 0, { fn: "dbl", arity: 1 }, ["x"]], ["m", "mul", 400, 0, {}, ["f", "c"]], ["o", "out", 600, 0, { arity: 1 }, ["m"]]] });
   const rb = buildFunctionDef(b.g, [b.n.x.id, b.n.c.id, b.n.f.id, b.n.m.id], "six", null, lib);
   assert.equal(rb.ok, true, rb.error);
-  // dbl 的参数复用同一个 I 节点，展开后不会再多一个输入节点：I + C3 + (C2 + mul) + mul = 11
-  assert.equal(rb.def.weight, 11);
+  // dbl 的参数复用同一个 I 节点：C3 + (C2 + mul) + mul = 10（参数 I 不算权重）
+  assert.equal(rb.def.weight, 10);
   lib.set(rb.def);
 
   const ex = expandGraph(b.g, lib);
@@ -203,10 +204,10 @@ test("函数库：增删改查与 JSON 往返", () => {
   lib.set({ name: "id", params: 1, body: body.toJSON() });
   assert.equal(lib.size, 1);
   assert.equal(lib.get("id").params, 1);
-  assert.equal(lib.get("id").weight, 1);
+  assert.equal(lib.get("id").weight, 0);
   const clone = FunctionLibrary.fromJSON({ functions: lib.toJSON() });
   assert.equal(clone.size, 1);
-  assert.equal(clone.get("id").weight, 1);
+  assert.equal(clone.get("id").weight, 0);
   assert.equal(clone.delete("id"), true);
   assert.equal(clone.size, 0);
 });
@@ -225,7 +226,7 @@ test("打包：悬空输入端口各自变成一个参数，不会有孤儿参�
   assert.equal(r.ok, true, r.error);
   assert.equal(r.def.params, 4); // 4 个悬空端口 = 4 个参数
   assert.deepEqual(r.plan.paramSources, [null, null, null, null]);
-  assert.equal(r.def.weight, 7); // 4 个 I + 3 个 add
+  assert.equal(r.def.weight, 3); // 3 个 add（4 个参数 I 不算权重）
 
   // 函数体里每个参数都能用上，且没有悬空端口（否则参数就是摆设）
   const body = Graph.fromJSON(r.def.body);
@@ -309,4 +310,59 @@ test("展开为节点：直通函数不会凭空消失，下游直接接到来�
   assert.equal(res.outSrc, x.id);
   assert.equal(o.inputs[0], x.id); // 下游没被丢掉
   assert.equal(g.has(call.id), false);
+});
+
+test("中转节点：W0 直通，导出时被省略", () => {
+  const g = new Graph();
+  const x = g.createNode("I");
+  const w1 = g.createNode("wire", 0, 100);
+  const w2 = g.createNode("wire", 0, 160);
+  const o = g.createNode("out", 0, 220, { arity: 1 });
+  g.connect(x.id, w1.id, 0);
+  g.connect(w1.id, w2.id, 0);
+  g.connect(w2.id, o.id, 0);
+  assert.equal(g.cost(), 1); // 中转是 W0
+  const ev = evaluateGraph(g, ["2.5"]);
+  assert.equal(ev.ok, true, ev.error);
+  assert.equal(ev.outputs[0].ld(), 2.5);
+  // 导出：中转被穿透，只剩输入节点一条指令
+  assert.equal(toProblemText(g), "1\nI\nOUT 1 1\n");
+});
+
+test("中转节点：没连线的中转导出时报错", () => {
+  const g = new Graph();
+  const w = g.createNode("wire", 0, 0);
+  const o = g.createNode("out", 0, 100, { arity: 1 });
+  g.connect(w.id, o.id, 0);
+  assert.throws(() => toProblemText(g));
+});
+
+test("展开为节点：原地展开，包围盒中心落在调用节点上", () => {
+  const a = rebuild({ nodes: [["x", "I"], ["c", "C", 0, 120, { value: "2" }], ["m", "mul", 200, 0, {}, ["x", "c"]], ["o", "out", 400, 0, { arity: 1 }, ["m"]]] });
+  const ra = buildFunctionDef(a.g, [a.n.x.id, a.n.c.id, a.n.m.id], "dbl", null, null);
+  const lib = new FunctionLibrary([ra.def]);
+  const g = new Graph();
+  const src = g.createNode("I", 0, -400);
+  const call = g.createNode("fn", 1200, 900, { fn: "dbl", arity: 1 });
+  const o = g.createNode("out", 1600, 900, { arity: 1 });
+  g.connect(src.id, call.id, 0);
+  g.connect(call.id, o.id, 0);
+  const res = expandCallInPlace(g, call.id, lib);
+  assert.equal(res.ok, true, res.error);
+  assert.equal(res.ids.length, 2);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const id of res.ids) {
+    const n = g.get(id);
+    minX = Math.min(minX, n.x);
+    maxX = Math.max(maxX, n.x + nodeWidth(n));
+    minY = Math.min(minY, n.y);
+    maxY = Math.max(maxY, n.y + nodeHeight());
+  }
+  const wantX = call.x + nodeWidth(call) / 2;
+  const wantY = call.y + nodeHeight() / 2;
+  assert.ok(Math.abs((minX + maxX) / 2 - wantX) <= 1, "x 中心偏了：" + (minX + maxX) / 2 + " vs " + wantX);
+  assert.ok(Math.abs((minY + maxY) / 2 - wantY) <= 1, "y 中心偏了：" + (minY + maxY) / 2 + " vs " + wantY);
 });

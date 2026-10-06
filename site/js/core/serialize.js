@@ -13,6 +13,20 @@ export class GraphFormatError extends Error {
 
 const OP_TO_TYPE = { "+": "add", "*": "mul", "-": "neg", S: "sin", T: "cos", E: "exp", Q: "sqrt" };
 
+// 中转节点（type "wire"）是纯别名：导出时穿透它，直达真正的来源。
+// 遇到没连线的中转返回 null，让调用方按「悬空」报错。
+function resolveRef(graph, id) {
+  let cur = id;
+  for (let guard = 0; guard < 10000; guard++) {
+    const n = graph.get(cur);
+    if (!n || n.type !== "wire") return cur;
+    const next = n.inputs[0];
+    if (next === null || next === undefined) return null;
+    cur = next;
+  }
+  return null;
+}
+
 export function toProblemText(graph) {
   const order = graph.topoOrder();
   if (order === null) throw new GraphFormatError("cycle", "图中存在环，不能导出");
@@ -20,7 +34,10 @@ export function toProblemText(graph) {
   if (outNodes.length === 0) throw new GraphFormatError("no-out", "缺少输出节点");
   if (outNodes.length > 1) throw new GraphFormatError("multi-out", "只能有一个输出节点");
 
-  const emit = order.filter((id) => graph.get(id).type !== "out");
+  const emit = order.filter((id) => {
+    const t = graph.get(id).type;
+    return t !== "out" && t !== "wire"; // 中转节点不产生指令
+  });
   if (emit.length === 0) throw new GraphFormatError("empty", "没有可导出的节点");
   if (emit.length > MAX_NODES) {
     throw new GraphFormatError("nodes", "节点数 " + emit.length + " 超过上限 " + MAX_NODES);
@@ -35,7 +52,7 @@ export function toProblemText(graph) {
     const t = NODE_TYPES[node.type];
     const refs = node.inputs.map((s) => {
       if (s === null) throw new GraphFormatError("dangling", "节点 #" + oldId + " 的输入端口未连线");
-      const mapped = idMap.get(s);
+      const mapped = idMap.get(resolveRef(graph, s));
       if (mapped === undefined) throw new GraphFormatError("dangling", "节点 #" + oldId + " 引用了不可用节点");
       return mapped;
     });
@@ -50,7 +67,7 @@ export function toProblemText(graph) {
   if (out.inputs.length === 0) throw new GraphFormatError("no-out", "输出端口为空");
   const outRefs = out.inputs.map((s) => {
     if (s === null) throw new GraphFormatError("dangling", "输出端口未连线");
-    const mapped = idMap.get(s);
+    const mapped = idMap.get(resolveRef(graph, s));
     if (mapped === undefined) throw new GraphFormatError("dangling", "输出引用了不可用节点");
     return mapped;
   });
